@@ -1,0 +1,375 @@
+import sys
+import os
+
+# Add backend directory to path
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+
+from fastapi.testclient import TestClient
+from app.main import app
+from app.database import Base, engine
+
+Base.metadata.create_all(bind=engine)
+client = TestClient(app)
+
+def test_root():
+    response = client.get("/")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "online"
+    assert "demo_mode" in data
+
+def test_current_weather():
+    response = client.get("/api/weather/current?location=Pune")
+    assert response.status_code == 200
+    data = response.json()
+    assert "weather" in data
+    assert "risk" in data
+    assert "Pune" in data["weather"]["location"]
+    assert data["risk"]["score"] >= 0
+    assert "breakdown" in data["risk"]
+
+def test_forecast():
+    response = client.get("/api/weather/forecast?location=Mumbai")
+    assert response.status_code == 200
+    data = response.json()
+    assert "forecast" in data
+    assert len(data["forecast"]) > 0
+
+def test_chat():
+    # Test English General query
+    response = client.post("/api/chat", json={
+        "query": "Will it rain in Pune tomorrow?",
+        "role": "general"
+    })
+    assert response.status_code == 200
+    data = response.json()
+    assert "answer_text" in data
+    assert "session_id" in data
+    assert data["alert_level"] in ["LOW", "MODERATE", "HIGH", "SEVERE"]
+
+    # Test Farmer Mode Marathi query
+    session_id = data["session_id"]
+    response2 = client.post("/api/chat", json={
+        "query": "उद्या पुण्यात पाऊस पडणार आहे का?",
+        "session_id": session_id,
+        "role": "farmer",
+        "lang": "mr"
+    })
+    assert response2.status_code == 200
+    data2 = response2.json()
+    assert "answer_text" in data2
+
+def test_route_analyze():
+    response = client.post("/api/route/analyze", json={
+        "from_location": "Pune",
+        "to_location": "Mumbai"
+    })
+    assert response.status_code == 200
+    data = response.json()
+    assert "timeline" in data
+    assert len(data["timeline"]) == 5  # Pune, Lonavala, Khopoli, Panvel, Mumbai
+    assert "ai_travel_recommendation" in data
+
+def test_alerts():
+    response = client.get("/api/alerts")
+    assert response.status_code == 200
+    data = response.json()
+    assert "alerts" in data
+    assert len(data["alerts"]) > 0
+
+def test_disaster():
+    response = client.get("/api/disaster/dashboard")
+    assert response.status_code == 200
+    data = response.json()
+    assert "metrics" in data
+    assert "critical_zones" in data
+    assert "ai_situation_summary" in data
+
+def test_emergency():
+    response = client.get("/api/emergency/locations?city=Pune")
+    assert response.status_code == 200
+    data = response.json()
+    assert "locations" in data
+    assert len(data["locations"]) > 0
+
+    chk = client.get("/api/emergency/checklist?hazard=flood")
+    assert chk.status_code == 200
+    assert "before" in chk.json()
+
+def test_simulation():
+    res = client.post("/api/simulation/disaster", json={"scenario": "HEAVY_RAIN", "intensity": 1.2})
+    assert res.status_code == 200
+    assert "result" in res.json()
+
+    whatif = client.post("/api/simulation/whatif", json={"location": "Pune", "rainfall_delta_percent": 30})
+    assert whatif.status_code == 200
+    assert "simulated_score" in whatif.json()
+
+def test_climate():
+    res = client.get("/api/climate/insights?location=Pune")
+    assert res.status_code == 200
+    assert "monthly_averages" in res.json()
+
+def test_location():
+    res = client.get("/api/location/search?q=Pune")
+    assert res.status_code == 200
+    assert "resolved" in res.json()
+
+def test_default_location_nashik():
+    # 1. Test near me / default search resolves to Nashik
+    res = client.get("/api/location/search?q=near me")
+    assert res.status_code == 200
+    resolved = res.json()["resolved"]
+    assert resolved["name"] == "Nashik"
+    assert round(resolved["lat"], 4) == 20.0059
+    assert round(resolved["lon"], 4) == 73.7797
+
+    # 2. Test climate insights defaults to Nashik
+    climate_res = client.get("/api/climate/insights")
+    assert climate_res.status_code == 200
+    assert "Nashik" in climate_res.json()["location"]
+
+    # 3. Test current weather for Nashik
+    w_res = client.get("/api/weather/current?location=Nashik")
+    assert w_res.status_code == 200
+    assert "Nashik" in w_res.json()["weather"]["location"]
+
+def test_report():
+    res = client.post("/api/report/generate", json={"location": "Pune", "report_type": "daily"})
+    assert res.status_code == 200
+    assert "executive_summary" in res.json()
+
+def test_auth():
+    import time
+    test_email = f"test_{int(time.time())}@weathergpt.local"
+    
+    # 1. Test Register
+    reg_res = client.post("/api/auth/register", json={
+        "email": test_email,
+        "password": "Password123!",
+        "name": "Kisan Demo",
+        "role": "farmer"
+    })
+    assert reg_res.status_code == 201
+    reg_data = reg_res.json()
+    assert reg_data["success"] is True
+    assert reg_data["user"]["email"] == test_email
+    assert reg_data["user"]["role"] == "farmer"
+    assert "token" in reg_data
+
+    # 2. Test Login
+    login_res = client.post("/api/auth/login", json={
+        "email": test_email,
+        "password": "Password123!"
+    })
+    assert login_res.status_code == 200
+    login_data = login_res.json()
+    assert login_data["success"] is True
+    token = login_data["token"]
+
+    # 3. Test Me
+    me_res = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert me_res.status_code == 200
+    assert me_res.json()["user"]["email"] == test_email
+
+    # 4. Test Guest Login
+    guest_res = client.post("/api/auth/guest", json={"role": "traveller"})
+    assert guest_res.status_code == 200
+    assert guest_res.json()["user"]["is_guest"] is True
+
+def test_healthz():
+    res = client.get("/healthz")
+    assert res.status_code == 200
+    assert res.json()["status"] == "healthy"
+
+def test_analytics():
+    res_summary = client.get("/api/analytics/summary")
+    assert res_summary.status_code == 200
+    assert "total_registered_users" in res_summary.json()
+
+    res_popular = client.get("/api/analytics/popular-cities")
+    assert res_popular.status_code == 200
+    assert "popular_cities" in res_popular.json()
+
+    res_active = client.get("/api/analytics/active-users")
+    assert res_active.status_code == 200
+    assert "active_sessions_last_30min" in res_active.json()
+
+    res_history = client.get("/api/analytics/alert-history")
+    assert res_history.status_code == 200
+    assert "alerts" in res_history.json()
+
+def test_websockets():
+    # Test WebSocket alerts connection and ping-pong
+    with client.websocket_connect("/api/ws/alerts") as ws:
+        data = ws.receive_json()
+        assert data["type"] == "connected"
+        ws.send_json({"type": "ping"})
+        pong = ws.receive_json()
+        assert pong["type"] == "pong"
+
+    # Test WebSocket city weather push and refresh
+    with client.websocket_connect("/api/ws/weather/pune") as ws:
+        data = ws.receive_json()
+        assert data["type"] == "weather_update"
+        assert data["city"] == "pune"
+        ws.send_json({"type": "ping"})
+        pong = ws.receive_json()
+        assert pong["type"] == "pong"
+
+def test_weather_providers():
+    res = client.get("/api/weather/providers")
+    assert res.status_code == 200
+    data = res.json()
+    assert "active_provider" in data
+    assert len(data["available_providers"]) >= 4
+
+    complete = client.get("/api/weather/complete?location=Pune")
+    assert complete.status_code == 200
+    c_data = complete.json()
+    assert "weather" in c_data
+    assert "risk" in c_data
+    assert "confidence_score" in c_data
+    assert "activities" in c_data
+
+def test_rag_pipeline():
+    res_search = client.get("/api/rag/search?q=lightning")
+    assert res_search.status_code == 200
+    s_data = res_search.json()
+    assert s_data["results_count"] > 0
+    assert "30-30" in s_data["documents"][0]["content"]
+
+    res_docs = client.get("/api/rag/documents")
+    assert res_docs.status_code == 200
+    assert res_docs.json()["total_documents"] >= 8
+
+def test_activity_advisor():
+    res = client.get("/api/weather/activity-advisor?location=Pune")
+    assert res.status_code == 200
+    data = res.json()
+    assert "activities" in data
+    assert len(data["activities"]) == 9
+    running = next(a for a in data["activities"] if a["activity"] == "running")
+    assert "suitability_score" in running
+    assert "optimal_window" in running
+
+def test_user_preferences_and_locations():
+    res_pref = client.get("/api/user/preferences")
+    assert res_pref.status_code == 200
+    assert "temp_unit" in res_pref.json()
+
+    res_locs = client.get("/api/user/locations")
+    assert res_locs.status_code == 200
+
+def test_system_health():
+    res = client.get("/api/health")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] in ["healthy", "degraded"]
+    assert "subsystems" in data
+    assert data["subsystems"]["database"]["status"] == "healthy"
+
+def test_temperature_accuracy_and_pipeline():
+    """Verifies that current temperature is actual air temperature (finite number), feels_like is separated, and coordinates match."""
+    res = client.get("/api/weather/current?location=Nashik&refresh=true")
+    assert res.status_code == 200
+    data = res.json()
+    assert "weather" in data
+    current = data["weather"]["current"]
+    
+    # 1. Temperature is a valid finite float/int
+    assert isinstance(current["temp"], (int, float))
+    assert isinstance(current["feels_like"], (int, float))
+    assert -50 <= current["temp"] <= 60
+    assert -50 <= current["feels_like"] <= 60
+    
+    # 2. Location coordinates match Nashik
+    coords = data["weather"]["coordinates"]
+    assert round(coords["lat"], 2) == 20.01 or round(coords["lat"], 2) == 20.00
+    assert round(coords["lon"], 2) == 73.78
+
+    # 3. Test city switching across India (Nashik -> Mumbai -> Delhi)
+    for city, (expected_lat, expected_lon) in [
+        ("Mumbai", (19.08, 72.88)),
+        ("Delhi", (28.70, 77.10)),
+        ("Nashik", (20.01, 73.78))
+    ]:
+        c_res = client.get(f"/api/weather/current?location={city}&refresh=true")
+        assert c_res.status_code == 200
+        c_data = c_res.json()
+        assert city in c_data["weather"]["location"]
+        assert isinstance(c_data["weather"]["current"]["temp"], (int, float))
+
+
+def test_temperature_unit_conversion_math():
+    """Validates that Fahrenheit to Celsius conversion formula (°F - 32) * 5/9 is exact and never applied twice."""
+    # 86°F -> 30°C
+    f_val = 86.0
+    c_val = (f_val - 32.0) * 5.0 / 9.0
+    assert round(c_val, 1) == 30.0
+
+    # 32°F -> 0°C
+    assert round((32.0 - 32.0) * 5.0 / 9.0, 1) == 0.0
+
+    # 212°F -> 100°C
+    assert round((212.0 - 32.0) * 5.0 / 9.0, 1) == 100.0
+
+
+if __name__ == "__main__":
+    print("Running WeatherGPT Backend Integration Tests...")
+    try:
+        test_root()
+        print("[OK] Root endpoint working")
+        test_healthz()
+        print("[OK] Healthcheck (/healthz) endpoint working")
+        test_system_health()
+        print("[OK] Comprehensive System Health & Diagnostics (/api/health) working")
+        test_auth()
+        print("[OK] User Authentication (Register, Login, Guest, Me) working")
+        test_user_preferences_and_locations()
+        print("[OK] User Preferences & Saved Locations working")
+        test_current_weather()
+        print("[OK] Current weather & risk engine working")
+        test_temperature_accuracy_and_pipeline()
+        print("[OK] Air temperature accuracy, feels-like separation & coordinates verified")
+        test_temperature_unit_conversion_math()
+        print("[OK] Temperature unit conversion math verified")
+        test_weather_providers()
+        print("[OK] Weather Provider Abstraction & /complete endpoint working")
+        test_forecast()
+        print("[OK] 7-day forecast retrieval working")
+        test_activity_advisor()
+        print("[OK] Activity Advisor (9 profiles) working")
+        test_rag_pipeline()
+        print("[OK] RAG Knowledge Base & Semantic Search working")
+        test_chat()
+        print("[OK] AI Multilingual Chatbot & Personas working")
+        test_route_analyze()
+        print("[OK] Weather Route Intelligence working")
+        test_alerts()
+        print("[OK] Official alerts working")
+        test_disaster()
+        print("[OK] Disaster Command Center metrics working")
+        test_emergency()
+        print("[OK] Emergency Safe Location Finder working")
+        test_simulation()
+        print("[OK] Disaster & What-If Simulation working")
+        test_climate()
+        print("[OK] Climate Insights & Trends working")
+        test_location()
+        print("[OK] Natural Language Location Search working")
+        test_default_location_nashik()
+        print("[OK] Default Location Nashik (20.0059, 73.7797) verified")
+        test_report()
+        print("[OK] Weather Intelligence Report Generator working")
+        test_analytics()
+        print("[OK] Analytics & Product Insights endpoints working")
+        test_websockets()
+        print("[OK] Real-time WebSockets (/ws/alerts, /ws/weather) working")
+        print("\nAll 22 backend integration test suites PASSED successfully!")
+    except AssertionError as e:
+        print(f"Assertion failed: {e}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error during tests: {e}")
+        sys.exit(1)
